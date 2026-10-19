@@ -6,6 +6,7 @@
     },
     "python.terminal.activateEnvironment": false,
     "micropico.openOnStart": true,
+    "micropico.syncFolder": "laser-photodiode/pico",
     "python.analysis.typeshedPaths": [
         "~/.micropico-stubs/included"
     ],

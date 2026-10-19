@@ -15,27 +15,19 @@ Use this section if the Pico already has the code on it and is already wired to 
 
 Plug the Pico into your computer with a USB cable that carries data (some cables only charge). The firmware (`main.py`) starts on its own at power-up. In data mode the laser stays **off** until you tell it to do something.
 
-### 2. Connect to it
+### 2. Connect from VS Code (MicroPico)
 
-Pick one of these. Only one program can talk to the Pico at a time, so close the other before switching.
-
-**Option A: Thonny (easiest, no install beyond Thonny)**
-1. Open Thonny. Go to Tools → Options → Interpreter, choose **MicroPython (Raspberry Pi Pico)**, and pick the Pico's port (or leave it on "Try to detect port automatically").
-2. When Thonny connects, it **stops** `main.py` and shows the `>>>` prompt. Your commands won't work at this point.
-3. To start `main.py`, click in the Shell and press **Ctrl+D** (Run → Send EOF / Soft reboot). Wait for this line:
+1. In VS Code, install the **MicroPico** extension (by paulober). VS Code offers it when you open this repo, because it's in the recommended extensions.
+2. Open the repo's top folder (`laser-comms`) in VS Code, using File → Open Folder.
+3. MicroPico connects to the Pico by itself, and the status bar at the bottom shows **Pico Connected**. If it says "Pico Disconnected", click it, or run **MicroPico: Connect** from the Command Palette (Cmd+Shift+P on Mac, Ctrl+Shift+P on Windows).
+4. Connecting can stop the program that's already running, so start it fresh: open `laser-photodiode/pico/main.py` and click **Run** in the status bar. (This runs the file on the Pico. It uses the `config.py` already on the board, so the board keeps its role.)
+5. The **vREPL** terminal opens at the bottom and shows:
    ```
    READY role=BOTH baud=1000 frame=360 ms (type 'help')
    ```
-4. Type commands in the Shell and press Enter. **Ctrl+C** stops `main.py` and returns you to `>>>`. Press Ctrl+D to start it again.
+6. Click inside the vREPL terminal, type a command, and press Enter. Click **Stop** in the status bar when you're done.
 
-**Option B: the terminal script (Mac, Linux, Windows, Pi)**
-1. Install pyserial once: `python3 -m pip install --user pyserial` (on the Pi: `sudo apt install python3-serial`).
-2. From this folder, run:
-   ```
-   python3 host/pico_term.py --rx
-   ```
-   It finds the Pico by itself (`--port` picks one if several are plugged in). If the Pico is sitting at `>>>`, the script restarts `main.py` for you.
-3. With `--rx`, every line you type is a Pico command. Without `--rx`, whatever you type is **sent over the laser as a message**, and commands need a `/` in front (`/help`, `/stat`). Ctrl+C quits.
+Only one program can use the Pico's USB port at a time, so close anything else that might be connected to it.
 
 ### 3. Check that it's alive
 
@@ -99,8 +91,8 @@ With the laser aimed at the photodiode:
 
 ### If something's wrong
 
-- **Nothing happens when you type:** the Pico is probably at `>>>`. Press Ctrl+D in Thonny, or restart `pico_term.py`.
-- **`pico_term.py` says "No Pico found":** try another USB cable or port, and close Thonny if it's open.
+- **Nothing happens when you type:** the program probably isn't running (the vREPL shows `>>>`). Open `laser-photodiode/pico/main.py` and click **Run** again. Make sure you click inside the vREPL terminal before you type.
+- **MicroPico stays on "Pico Disconnected":** try another USB cable or port, close any other app that might be using the Pico, then run **MicroPico: Connect**.
 - **The laser went off by itself:** `on` and `sq` turn off after 5 minutes for eye safety (you'll see `INFO laser timeout -> off`). Type the command again.
 - **`msg` sends but nothing arrives:** run `sq 2` on the laser and `cal` on the receiver to check the aim and the light levels.
 - **Eye safety:** never look into the beam, and keep it below eye height.
@@ -113,7 +105,7 @@ With the laser aimed at the photodiode:
 | `pico/linkproto.py` | both Picos | Framing, Reed-Solomon error correction, message reassembly |
 | `pico/config.py` | both Picos | `ROLE = "BOTH"`, `"TX"` or `"RX"`, plus pins and baud |
 | `pico/motors.py` | TX Pico | Empty hook for the gimbal team (`MOT ...` commands) |
-| `host/pico_term.py` | Pi 5 and laptop B | Terminal: typed lines become laser messages, received messages print |
+| `host/pico_term.py` | Pi 5 | Runs on the Pi: typed lines become laser messages, and the vision code can send `MOT` commands through it |
 | `tests/sim_test.py` | your PC | Desktop test of the error correction with a simulated noisy link |
 
 ## Design decisions
@@ -168,9 +160,9 @@ For the one-Pico bench test (ROLE `BOTH`), wire both tables to the same Pico.
 Do each stage in order, and don't move on until it passes. Wire only with USB unplugged.
 
 ### Stage 0: flash the Pico (10 min)
-1. Hold BOOTSEL, plug the Pico in, and open Thonny. Go to Tools → Options → Interpreter, choose "MicroPython (Raspberry Pi Pico)", then click "Install or update MicroPython" and pick the **Pico 2 W** variant (or drag the RPI_PICO2_W `.uf2` from micropython.org/download onto the RP2350 drive). Unplug and replug the Pico.
-2. Open each file in `pico/` and use File → Save as… → Raspberry Pi Pico, keeping the same name. Save `main.py` last. Leave `ROLE = "BOTH"`.
-3. Press Stop/Restart, then Run (F5). The Shell should print `READY role=BOTH baud=1000 frame=360 ms`. You type commands in the Shell, and `help` lists them.
+1. Download the **RPI_PICO2_W** `.uf2` file from micropython.org/download. Hold BOOTSEL, plug the Pico in, and drag the `.uf2` onto the RP2350 drive that appears. The Pico restarts on its own.
+2. Open the repo in VS Code with MicroPico (see the quick start above). Leave `ROLE = "BOTH"` in `pico/config.py`. Run **MicroPico: Upload project to Pico** from the Command Palette. The project is set to upload only the `laser-photodiode/pico/` folder, so the board gets `main.py`, `config.py`, `linkproto.py` and `motors.py`.
+3. Open `pico/main.py` and click **Run** in the status bar. The vREPL should print `READY role=BOTH baud=1000 frame=360 ms`. You type commands in the vREPL, and `help` lists them.
 
 ### Stage 1: laser on 3.3 V drive
 Wire the TX table only.
@@ -194,13 +186,13 @@ Clamp the laser and the OPT101 facing each other a short distance apart, with th
 
 ### Stage 4: split onto two Picos (you'll need a second Pico)
 - Copy the same four files to both boards. Set `ROLE = "TX"` on the laser board and `ROLE = "RX"` on the OPT101 board.
-- Repeat Stage 3 across the two boards. Type `sq 2`, `sq 500` and `test 200` on the TX board, and `cal`, `scope` and read the results on the RX board. Use two Thonny windows, or one Thonny window plus `pico_term.py`.
+- Repeat Stage 3 across the two boards. Type `sq 2`, `sq 500` and `test 200` on the TX board, and `cal`, `scope` and read the results on the RX board. MicroPico talks to one board at a time. Use **MicroPico: Switch Pico** to move between them, or plug each board into its own computer.
 
 ### Stage 5: Pi 5 and the two laptops
 1. **Pi 5:** run `sudo apt install python3-serial`, copy `host/pico_term.py` over, and plug in the TX Pico.
 2. **Laptop A → Pi 5:** connect them with an Ethernet cable and run `ssh <user>@<pi-hostname>.local`. The ssh client is built into Windows, so no admin rights are needed. If `.local` doesn't resolve over a direct cable, put both on the same Wi-Fi network, or give the Pi a static IP.
 3. On the Pi, run `tmux`, then `python3 pico_term.py`. Type a line and press Enter, and the laser sends it. `/test 500` and `/stat` also work from here.
-4. **Laptop B:** plug in the RX Pico. Either open Thonny and Run `main.py` (messages appear in the Shell), or run `python -m pip install --user pyserial` and then `python pico_term.py --rx`.
+4. **Laptop B:** plug in the RX Pico, open the repo in VS Code and Run `main.py` with MicroPico. Messages appear in the vREPL.
 5. The vision program can send gimbal commands while the terminal is open: `from pico_term import hub_send; hub_send("MOT 10 -2")`.
 
 ### Stage 6: down the hall
@@ -212,7 +204,7 @@ Then `test 1000` should PASS end to end before you show the demo.
 - **Eye safety:** the datasheet allows up to 10 mW. Keep the beam below eye height, put a stop behind the receiver, and warn people in the hall. In data mode the laser is off when idle, and `on` and `sq` turn themselves off after 5 minutes.
 - **The beacon LED sits right on top of the sensor.** If its light reaches the photodiode, it raises the dark level. Run `cal` with the beacon blinking to check.
 - **Gimbal pointing jitter** shows up as burst errors. Up to 40 ms of beam loss per frame is repaired automatically. Use `rep 2` if the tracking is wobbly.
-- **Thonny stops `main.py` when it connects.** `pico_term.py` detects this and soft-reboots the Pico.
+- **MicroPico can stop `main.py` when it connects.** Click Run on `main.py` again. On the Pi, `pico_term.py` detects this and soft-reboots the Pico.
 
 ## What's tested and what isn't
 - Error correction: 3000 random codewords with 0–4 byte errors all repaired, and no wrong frames got through in 3000 overloaded trials. It was run under both CPython and real MicroPython (the WebAssembly build). Run `python3 tests/sim_test.py` to repeat it.
