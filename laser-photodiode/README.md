@@ -7,6 +7,104 @@ Laptop A ──ssh──► Pi 5 ──USB──► TX Pico ──GP16──► 
                   (vision)      (laser + motors)                (+ beacon LED)
 ```
 
+## Quick start: using a Pico that's already set up
+
+Use this section if the Pico already has the code on it and is already wired to the laser and/or the photodiode. You don't need to flash or copy anything. (Setting up a board from scratch is covered in the bring-up stages further down.)
+
+### 1. Plug it in
+
+Plug the Pico into your computer with a USB cable that carries data (some cables only charge). The firmware (`main.py`) starts on its own at power-up. In data mode the laser stays **off** until you tell it to do something.
+
+### 2. Connect to it
+
+Pick one of these. Only one program can talk to the Pico at a time, so close the other before switching.
+
+**Option A: Thonny (easiest, no install beyond Thonny)**
+1. Open Thonny. Go to Tools → Options → Interpreter, choose **MicroPython (Raspberry Pi Pico)**, and pick the Pico's port (or leave it on "Try to detect port automatically").
+2. When Thonny connects, it **stops** `main.py` and shows the `>>>` prompt. Your commands won't work at this point.
+3. To start `main.py`, click in the Shell and press **Ctrl+D** (Run → Send EOF / Soft reboot). Wait for this line:
+   ```
+   READY role=BOTH baud=1000 frame=360 ms (type 'help')
+   ```
+4. Type commands in the Shell and press Enter. **Ctrl+C** stops `main.py` and returns you to `>>>`. Press Ctrl+D to start it again.
+
+**Option B: the terminal script (Mac, Linux, Windows, Pi)**
+1. Install pyserial once: `python3 -m pip install --user pyserial` (on the Pi: `sudo apt install python3-serial`).
+2. From this folder, run:
+   ```
+   python3 host/pico_term.py --rx
+   ```
+   It finds the Pico by itself (`--port` picks one if several are plugged in). If the Pico is sitting at `>>>`, the script restarts `main.py` for you.
+3. With `--rx`, every line you type is a Pico command. Without `--rx`, whatever you type is **sent over the laser as a message**, and commands need a `/` in front (`/help`, `/stat`). Ctrl+C quits.
+
+### 3. Check that it's alive
+
+| Type | You should see |
+|---|---|
+| `ping` | `PONG` |
+| `role` | `OK role=BOTH`, `TX` or `RX` |
+| `help` | the list of commands this board accepts |
+
+Which commands work depends on the board's role, set in `config.py`:
+- **TX**: the laser board. Laser commands only.
+- **RX**: the photodiode board. Sensor commands only.
+- **BOTH**: one Pico wired to the laser *and* the photodiode. Every command works, and the board receives its own laser light (loopback).
+
+If a command replies `ERR unknown command`, check the spelling first, then check that the board's role supports it.
+
+### 4. Commands
+
+**Laser (TX or BOTH)**
+
+| Command | What it does |
+|---|---|
+| `on` | Laser on steady, for aiming. Turns itself off after 5 minutes. |
+| `off` | Laser off. |
+| `sq 2` | Blinks the laser 2 times a second (any rate from 0.5 to 5000 Hz). `sq` with no number means `sq 500`. Times out after 5 minutes. |
+| `data` | Back to normal data mode (laser off while idle). `msg` and `test` switch to this mode automatically. |
+| `msg hello world` | Sends the text over the laser with error correction. Up to 2000 bytes, about 47 characters per second. |
+| `test 200` | Sends 200 numbered test frames (about 72 s) so the receiver can score the link. `test` with no number sends 200. |
+| `rep 2` | Sends every message frame twice, for a wobbly link. `rep 1` goes back to normal. |
+| `mot <args>` | Passed to `motors.py` for the gimbal. Does nothing until someone writes that file. |
+
+**Photodiode (RX or BOTH)**
+
+| Command | What it does |
+|---|---|
+| `mon` | Prints the sensor voltage 10 times a second as a number and a bar. Stops after 20 s, or when you press any key. |
+| `cal` | Measures for 2 s and reports the dark and lit levels. Run it while the laser runs `sq 2`. You want dark ≤ 0.5 V and lit ≥ 2.3 V. |
+| `scope` | Fast capture that measures pulse widths. Run it while the laser runs `sq 500`. Both pulse means should be 1000 µs ± 250. |
+| `beacon 4` | Blinks the beacon LED at 4 Hz. Also `beacon on` and `beacon off`. |
+| `reset` | Clears the receive counters. |
+
+**Any role**
+
+| Command | What it does |
+|---|---|
+| `stat` | Counters: frames sent, frames received, bytes repaired, and so on. |
+| `ping`, `role`, `help` | As described above. |
+
+Received messages print on the receiving board as `MSG 0: hello world`. After a `test`, the receiving board prints a report that ends in `TEST verdict: PASS` or `FAIL`.
+
+### 5. Try it: a 2-minute tour on a BOTH board
+
+With the laser aimed at the photodiode:
+1. `mon`, then cover and uncover the sensor with your hand. The bar should jump. Press Enter to stop.
+2. `on`, then `mon`. The bar should sit high. Then `off`.
+3. `sq 2`, then `mon`. The bar should jump up and down twice a second. Press Enter, then run `cal` while it's still blinking.
+4. `data`, then `msg hello world`. About a second later you should see `MSG 0: hello world`.
+5. `test 50`. About 18 s later you should see `TEST verdict: PASS`.
+
+**With two boards (TX and RX):** connect to each from its own computer, or from two windows. Type the laser commands on the TX board and read the results (`MSG ...`, the `TEST` report, `cal`, `scope`, `mon`) on the RX board.
+
+### If something's wrong
+
+- **Nothing happens when you type:** the Pico is probably at `>>>`. Press Ctrl+D in Thonny, or restart `pico_term.py`.
+- **`pico_term.py` says "No Pico found":** try another USB cable or port, and close Thonny if it's open.
+- **The laser went off by itself:** `on` and `sq` turn off after 5 minutes for eye safety (you'll see `INFO laser timeout -> off`). Type the command again.
+- **`msg` sends but nothing arrives:** run `sq 2` on the laser and `cal` on the receiver to check the aim and the light levels.
+- **Eye safety:** never look into the beam, and keep it below eye height.
+
 ## Folder contents
 
 | File | Goes on | What it does |
@@ -80,7 +178,7 @@ Wire the TX table only.
 - `sq 2` blinks the laser twice per second. `data` returns it to data mode with the laser idle off.
 
 ### Stage 2: OPT101 alone
-Wire the RX table. `mon` prints the pin voltage 10 times per second. Press Enter to stop it.
+Wire the RX table. `mon` prints the pin voltage 10 times per second. It stops after 20 s, or press Enter to stop it early.
 - Covered: about 0.00–0.02 V.
 - Room light: somewhere in between.
 - Flashlight right on the sensor: about 2.4–2.6 V, and **never above 2.8 V** (if it is, recheck the divider).
