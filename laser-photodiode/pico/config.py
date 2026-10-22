@@ -3,7 +3,7 @@
 # "BOTH" = one Pico drives the laser AND reads the OPT101 (bench loopback).
 # "TX"   = laser Pico (plugged into the Pi 5).
 # "RX"   = photodiode Pico (plugged into the receiving laptop).
-ROLE = "BOTH"
+ROLE = "TX"
 
 BAUD = 1000          # line rate in bits/s (8N1 -> 100 bytes/s raw)
 GAP_MS = 20          # idle laser-off gap between frames (lets UART resync)

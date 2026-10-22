@@ -382,13 +382,18 @@ class MessageAssembler:
         self.parts = {}     # mid -> {frag_index: bytes}
         self.last = {}      # mid -> index of last fragment, if seen
         self.touched = {}   # mid -> time of last fragment
-        self.done = []      # recently completed mids (dedup repeats)
+        # mid -> time it completed. Repeats ('rep 2') arrive within a frame
+        # or two, so a mid is only remembered briefly: after a TX restart the
+        # ids start again at 0 and must not be mistaken for repeats.
+        self.done = {}
         self.timeout = timeout_ms
 
     def add(self, fr, now):
         mid = fr.mid
         if mid in self.done:
-            return None
+            if ticks_diff(now, self.done[mid]) < self.timeout:
+                return None
+            del self.done[mid]
         idx = fr.frag & 0x7F
         p = self.parts.setdefault(mid, {})
         p[idx] = fr.payload
@@ -398,16 +403,14 @@ class MessageAssembler:
         if mid in self.last:
             n = self.last[mid] + 1
             if len(p) >= n and all(i in p for i in range(n)):
-                return self._finish(mid, False)
+                return self._finish(mid, False, now)
         return None
 
-    def _finish(self, mid, partial):
+    def _finish(self, mid, partial, now=None):
         p = self.parts.pop(mid)
         n = self.last.pop(mid, max(p) if p else 0) + 1
-        self.touched.pop(mid, None)
-        self.done.append(mid)
-        if len(self.done) > 32:
-            self.done.pop(0)
+        t = self.touched.pop(mid, None)
+        self.done[mid] = now if now is not None else t
         raw = b""
         for i in range(n):
             raw += p.get(i, b"?" * 3 if partial else b"")
@@ -421,5 +424,8 @@ class MessageAssembler:
         out = []
         for mid in list(self.touched):
             if ticks_diff(now, self.touched[mid]) > self.timeout:
-                out.append(self._finish(mid, True))
+                out.append(self._finish(mid, True, now))
+        for mid in list(self.done):
+            if ticks_diff(now, self.done[mid]) > self.timeout:
+                del self.done[mid]
         return out

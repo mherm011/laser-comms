@@ -55,6 +55,7 @@ If a command replies `ERR unknown command`, check the spelling first, then check
 | `sq 2` | Blinks the laser 2 times a second (any rate from 0.5 to 5000 Hz). `sq` with no number means `sq 500`. Times out after 5 minutes. |
 | `data` | Back to normal data mode (laser off while idle). `msg` and `test` switch to this mode automatically. |
 | `msg hello world` | Sends the text over the laser with error correction. Up to 2000 bytes, about 47 characters per second. |
+| `sendfile` | Sends the text file `message.txt` stored on the Pico (or `sendfile notes.txt` for another file, up to 20 KB). Edit `pico/message.txt`, then right-click it → **Upload file to Pico**. Use this for long text instead of pasting into the vREPL. |
 | `test 200` | Sends 200 numbered test frames (about 72 s) so the receiver can score the link. `test` with no number sends 200. |
 | `rep 2` | Sends every message frame twice, for a wobbly link. `rep 1` goes back to normal. |
 | `abc` | Sends A, B, C … Z over and over as raw bytes with no error correction, one every 100 ms (`abc 50` for faster). For watching the receiver live. Stops after 5 minutes, or with `stop`. |

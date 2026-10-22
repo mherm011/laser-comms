@@ -1,0 +1,4 @@
+Hello from the laser link!
+Put any text you want to send in this file, upload it to the TX Pico with
+MicroPico (right-click > Upload file to Pico), then type: sendfile
+Long files are split into messages of up to 2000 bytes, broken at line ends.

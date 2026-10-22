@@ -16,6 +16,7 @@ import linkproto as lp
 ROLE = cfg.ROLE.upper()
 HAS_TX = ROLE in ("TX", "BOTH")
 HAS_RX = ROLE in ("RX", "BOTH")
+MAX_FILE = 20000   # sendfile limit; every queued frame uses RAM
 FRAME_MS = lp.FRAME_LEN * 10 * 1000 // cfg.BAUD + cfg.GAP_MS
 
 
@@ -118,7 +119,7 @@ class Sender:
         return lp.build_frame(ftype, seq, mid, frag, payload)
 
     def message(self, text):
-        data = text.encode("utf-8")
+        data = text if isinstance(text, bytes) else text.encode("utf-8")
         if len(data) > 2000:
             return "ERR message too long (max 2000 bytes)"
         parts = lp.split_message(data)
@@ -131,6 +132,45 @@ class Sender:
         self.laser.data_mode()
         secs = len(self.queue) * FRAME_MS / 1000
         return "OK msg %d queued: %d bytes, %d frame(s), ~%.1f s" % (mid, len(data), len(parts) * self.repeat, secs)
+
+    def send_file(self, name):
+        """Send a text file stored on the Pico, as one message per <=2000 bytes."""
+        try:
+            with open(name, "rb") as fh:
+                data = fh.read(MAX_FILE + 1)
+        except OSError:
+            return "ERR no file '%s' on the Pico (upload it with MicroPico first)" % name
+        if len(data) > MAX_FILE:
+            return "ERR file larger than %d bytes" % MAX_FILE
+        data = data.replace(b"\r\n", b"\n").strip()
+        if not data:
+            return "ERR file '%s' is empty" % name
+        # Split at line breaks where possible so no message ends mid-character.
+        msgs = []
+        cur = b""
+        for line in data.split(b"\n"):
+            while len(line) > 2000:
+                if cur:
+                    msgs.append(cur)
+                    cur = b""
+                cut = 2000
+                while cut > 0 and (line[cut] & 0xC0) == 0x80:
+                    cut -= 1  # don't split a UTF-8 character
+                msgs.append(line[:cut])
+                line = line[cut:]
+            if cur and len(cur) + 1 + len(line) > 2000:
+                msgs.append(cur)
+                cur = line
+            else:
+                cur = cur + b"\n" + line if cur else line
+        if cur:
+            msgs.append(cur)
+        for m in msgs:
+            r = self.message(m)
+            if r.startswith("ERR"):
+                return r
+        secs = len(self.queue) * FRAME_MS / 1000
+        return "OK file '%s': %d bytes as %d message(s), ~%.0f s" % (name, len(data), len(msgs), secs)
 
     def start_test(self, n):
         self.run = (self.run + 1) & 0xFF
@@ -447,6 +487,7 @@ class Receiver:
 # ===================================================================== commands
 HELP_TX = """TX commands:
   msg <text>   send a text message
+  sendfile [name]  send a text file stored on the Pico (default message.txt)
   on / off     steady laser (alignment); 'on' times out after %d s
   sq <hz>      square wave (sq 2 for 'cal', sq 500 = 1000 bps for 'scope')
   data         back to data mode (laser idle off)
@@ -508,7 +549,7 @@ def main():
                 return
         if c == "":
             return
-        if tx and tx.abc and c in ("on", "off", "sq", "data", "msg", "test"):
+        if tx and tx.abc and c in ("on", "off", "sq", "data", "msg", "sendfile", "test"):
             tx.stop_abc()
             out("OK abc stopped")
             if rx and rx.raw:
@@ -542,6 +583,8 @@ def main():
                 out(rx.stat())
         elif tx and c == "msg":
             out(tx.message(arg))
+        elif tx and c == "sendfile":
+            out(tx.send_file(arg or "message.txt"))
         elif tx and c == "on":
             laser.steady(True)
             out("OK laser ON (auto-off in %d s)" % cfg.ON_TIMEOUT_S)
