@@ -105,6 +105,11 @@ class Sender:
         self.repeat = cfg.REPEAT
         self.next_ok = time.ticks_ms()
         self.frames_sent = 0
+        self.abc = None      # None, "raw" or "fec": repeating A..Z test
+        self.abc_ms = 100
+        self.abc_i = 0
+        self.abc_next = 0
+        self.abc_end = 0
 
     def _frame(self, ftype, mid, frag, payload, seq=None):
         if seq is None:
@@ -136,13 +141,50 @@ class Sender:
         self.laser.data_mode()
         return "OK test run %d: %d frames, ~%.0f s" % (self.run, n, n * FRAME_MS / 1000)
 
+    def start_abc(self, mode, ms):
+        self.abc = mode
+        self.abc_ms = ms
+        self.abc_i = 0
+        self.abc_next = time.ticks_ms()
+        self.abc_end = time.ticks_add(self.abc_next, cfg.ON_TIMEOUT_S * 1000)
+        self.laser.data_mode()
+        how = ("raw bytes, no error correction" if mode == "raw"
+               else "one error-corrected frame per letter")
+        return "OK abc %s: A..Z every %d ms (%s). 'stop' ends it; auto-stop in %d s" % (
+            mode, ms, how, cfg.ON_TIMEOUT_S)
+
+    def stop_abc(self):
+        was = self.abc
+        self.abc = None
+        return was
+
+    def _abc_service(self, now):
+        if time.ticks_diff(now, self.abc_end) >= 0:
+            self.abc = None
+            out("INFO abc timeout -> stopped")
+            return
+        if time.ticks_diff(now, self.abc_next) < 0 or self.queue:
+            return
+        ch = 65 + self.abc_i % 26
+        self.abc_i += 1
+        self.abc_next = time.ticks_add(now, self.abc_ms)
+        if self.abc == "raw":
+            self.laser.uart.write(bytes([ch]))
+        else:
+            # Only queued when the queue is empty, so the rate tops out at
+            # one letter per frame time.
+            self.queue.append(self._frame(lp.T_MSG, self.mid, 0x80, bytes([ch])))
+            self.mid = (self.mid + 1) & 0xFF
+
     def busy(self):
-        return bool(self.queue or self.test_left or self.end_left)
+        return bool(self.queue or self.test_left or self.end_left or self.abc)
 
     def service(self):
         if self.laser.mode != "data":
             return
         now = time.ticks_ms()
+        if self.abc:
+            self._abc_service(now)
         if time.ticks_diff(now, self.next_ok) < 0:
             return
         f = None
@@ -163,7 +205,9 @@ class Sender:
             self.end_left -= 1
             if not self.end_left:
                 dt = time.ticks_diff(now, self.test_t0) / 1000
-                out("OK test run %d sent: %d frames in %.1f s" % (self.run, self.test_total, dt))
+                out("OK test run %d sent: %d frames in %.1f s at %d bps (~%.0f bps of payload)"
+                    % (self.run, self.test_total, dt, cfg.BAUD,
+                       self.test_total * lp.PAYLOAD_MAX * 8 / max(dt, 0.001)))
         if f is not None:
             self.laser.uart.write(f)
             self.frames_sent += 1
@@ -173,9 +217,7 @@ class Sender:
 # ===================================================================== RX
 class Receiver:
     def __init__(self):
-        self.uart = UART(cfg.RX_UART, baudrate=cfg.BAUD, bits=8, parity=None,
-                         stop=1, rx=Pin(cfg.RX_PIN), rxbuf=2048,
-                         invert=UART.INV_RX)
+        self.open_uart()
         self.adc = ADC(cfg.ADC_PIN)
         self.dec = lp.FrameDecoder()
         self.asm = lp.MessageAssembler()
@@ -183,9 +225,18 @@ class Receiver:
         self.mon = False
         self.mon_next = 0
         self.mon_end = 0
+        self.raw = False     # print every received byte instead of decoding
+        self.raw_col = 0
+        self.raw_last = 0
+        self.raw_quiet = True
         self.beacon_pin = Pin(cfg.BEACON_PIN, Pin.OUT, value=0)
         self.beacon_timer = None
         self.beacon(cfg.BEACON_HZ)
+
+    def open_uart(self):
+        self.uart = UART(cfg.RX_UART, baudrate=cfg.BAUD, bits=8, parity=None,
+                         stop=1, rx=Pin(cfg.RX_PIN), rxbuf=2048,
+                         invert=UART.INV_RX)
 
     # ---------- beacon LED
     def beacon(self, hz):
@@ -271,7 +322,9 @@ class Receiver:
                            % (name, len(rl), sum(rl) / len(rl) * us, min(rl) * us, max(rl) * us))
         stride = max(1, int(4000 / us / 80))
         res.append("SCOPE 4 ms: " + "".join("#" if buf[i] >= thr else "_" for i in range(0, min(n, stride * 80), stride)))
-        res.append("SCOPE at 'sq 500' both pulse means should be 1000 us +/- 250")
+        bit_us = 1e6 / cfg.BAUD
+        res.append("SCOPE at 'sq %g' (= %d bps) both pulse means should be %.0f us +/- %.0f"
+                   % (cfg.BAUD / 2, cfg.BAUD, bit_us, bit_us / 4))
         return "\n".join(res)
 
     # ---------- data path
@@ -285,7 +338,7 @@ class Receiver:
             if t is None or t["run"] != fr.mid:
                 t = self.test = {"run": fr.mid, "got": set(), "fix": 0,
                                  "bad": 0, "rsf": self.dec.rs_fail, "crcf": self.dec.crc_fail,
-                                 "last": now, "max": 0, "done": False}
+                                 "last": now, "max": 0, "done": False, "quiet": False}
             idx = ((fr.frag & 0x7F) << 8) | fr.seq
             if idx not in t["got"]:
                 t["got"].add(idx)
@@ -294,14 +347,18 @@ class Receiver:
                     t["bad"] += 1
             t["max"] = max(t["max"], idx)
             t["last"] = now
+            t["quiet"] = False
         elif fr.type == lp.T_END:
             t = self.test
             if t and t["run"] == fr.mid and not t["done"] and len(fr.payload) == 2:
                 self.report((fr.payload[0] << 8) | fr.payload[1])
 
     def report(self, sent=None):
+        # sent=None: interim result after a gap; the test keeps counting and
+        # the final report still prints when the end marker arrives.
         t = self.test
-        t["done"] = True
+        final = sent is not None
+        t["done"] = final
         got = len(t["got"])
         if sent is None:
             sent = t["max"] + 1
@@ -313,7 +370,9 @@ class Receiver:
             % (t["fix"], nbytes, t["fix"] / nbytes))
         out("TEST payload errors after FEC: %d   undecodable frames: %d"
             % (t["bad"], self.dec.rs_fail - t["rsf"] + self.dec.crc_fail - t["crcf"]))
-        out("TEST verdict: %s" % ("PASS" if lost == 0 and t["bad"] == 0 else "FAIL"))
+        verdict = "PASS" if lost == 0 and t["bad"] == 0 else "FAIL"
+        out("TEST verdict: %s" % verdict if final else
+            "TEST so far: %s (still listening for the rest of the test)" % verdict)
 
     def show(self, r):
         mid, text, partial = r
@@ -322,17 +381,54 @@ class Receiver:
         else:
             out("MSG %d: %s" % (mid, text))
 
+    def set_raw(self, on):
+        self.raw = on
+        self.raw_col = 0
+        self.raw_quiet = True
+        if on:
+            self.uart.read()  # drop anything already buffered
+            return "OK raw display ON: received bytes print as they arrive ('raw off' to stop)"
+        return "OK raw display OFF"
+
+    def show_raw(self, data, now):
+        # Letters print as themselves, anything else as {hex}. New line after Z.
+        self.raw_last = now
+        self.raw_quiet = False
+        s = []
+        for b in data:
+            if 32 <= b < 127:
+                s.append(chr(b))
+                self.raw_col += 1
+            else:
+                s.append("{%02X}" % b)
+                self.raw_col += 4
+            if b == 90 or self.raw_col >= 64:
+                s.append("\n")
+                self.raw_col = 0
+        sys.stdout.write("".join(s))
+
     def service(self):
         now = time.ticks_ms()
         n = self.uart.any()
         if n:
-            for fr in self.dec.feed(self.uart.read(n)):
-                self.handle_frame(fr, now)
+            data = self.uart.read(n)
+            if self.raw:
+                self.show_raw(data, now)
+            else:
+                for fr in self.dec.feed(data):
+                    self.handle_frame(fr, now)
+        if self.raw and not self.raw_quiet and time.ticks_diff(now, self.raw_last) > 1000:
+            self.raw_quiet = True
+            if self.raw_col:
+                sys.stdout.write("\n")
+                self.raw_col = 0
+            out("RAW (no signal)")
         for r in self.asm.service(now):
             self.show(r)
         t = self.test
-        if t and not t["done"] and time.ticks_diff(now, t["last"]) > 3000:
-            out("TEST end marker not received; estimating sent count")
+        if t and not t["done"] and not t["quiet"] and time.ticks_diff(now, t["last"]) > 3000:
+            t["quiet"] = True
+            out("TEST no frames for 3 s (beam off the sensor?). Interim count:")
             self.report()
         if self.mon and time.ticks_diff(now, self.mon_end) >= 0:
             self.mon = False
@@ -356,14 +452,19 @@ HELP_TX = """TX commands:
   data         back to data mode (laser idle off)
   test <n>     send n test frames (default 200) and get a PASS/FAIL on RX
   rep <1|2>    send each message frame 1 or 2 times
+  abc [ms]     repeat A..Z as raw bytes (default every 100 ms); RX needs 'raw'
+  abc fec [ms] repeat A..Z, one error-corrected frame per letter
+  stop         stop abc
   mot <args>   pass to motors.py""" % cfg.ON_TIMEOUT_S
 HELP_RX = """RX commands:
   cal          2 s level check (run with laser 'sq 2')
   scope        fast capture + pulse widths (run with laser 'sq 500')
   mon          print sensor volts 10x/s for 20 s; any key stops it
+  raw [on|off] print every received byte as it arrives (for 'abc')
   beacon <hz|on|off>
   stat / reset decoder counters"""
-HELP_ALL = """All: help, ping, stat, role"""
+HELP_ALL = """All: help, ping, stat, role
+  baud <bps>   change the line rate until reboot (set it on BOTH ends)"""
 
 
 def main():
@@ -377,6 +478,20 @@ def main():
             import motors
         except ImportError:
             motors = None
+
+    def set_baud(b):
+        global FRAME_MS
+        cfg.BAUD = b
+        FRAME_MS = lp.FRAME_LEN * 10 * 1000 // b + cfg.GAP_MS
+        if tx:
+            tx.stop_abc()
+            if laser.mode == "data":
+                laser.mode = ""      # force data_mode() to reopen the UART
+                laser.data_mode()
+        if rx:
+            rx.open_uart()
+            rx.dec = lp.FrameDecoder()
+            rx.test = None
 
     poll = select.poll()
     poll.register(sys.stdin, select.POLLIN)
@@ -393,6 +508,11 @@ def main():
                 return
         if c == "":
             return
+        if tx and tx.abc and c in ("on", "off", "sq", "data", "msg", "test"):
+            tx.stop_abc()
+            out("OK abc stopped")
+            if rx and rx.raw:
+                out(rx.set_raw(False))
         if c == "help":
             out(HELP_ALL)
             if tx:
@@ -403,6 +523,17 @@ def main():
             out("PONG")
         elif c == "role":
             out("OK role=%s" % ROLE)
+        elif c == "baud":
+            if not arg:
+                out("OK baud=%d frame=%d ms" % (cfg.BAUD, FRAME_MS))
+                return
+            b = int(arg)
+            if not 300 <= b <= 20000:
+                out("ERR baud range 300..20000")
+                return
+            set_baud(b)
+            out("OK baud=%d frame=%d ms (until reboot; set the other board too)"
+                % (cfg.BAUD, FRAME_MS))
         elif c == "stat":
             if tx:
                 out("STAT tx frames sent %d, queued %d, laser mode %s, repeat %d"
@@ -432,6 +563,24 @@ def main():
         elif tx and c == "rep":
             tx.repeat = max(1, min(3, int(arg or "1")))
             out("OK repeat %d" % tx.repeat)
+        elif tx and c == "abc":
+            parts = arg.lower().split()
+            mode = "fec" if "fec" in parts else "raw"
+            nums = [p for p in parts if p != "fec"]
+            ms = int(nums[0]) if nums else (FRAME_MS if mode == "fec" else 100)
+            if not 15 <= ms <= 10000:
+                out("ERR abc interval 15..10000 ms")
+            else:
+                out(tx.start_abc(mode, ms))
+                if rx:  # BOTH board: show what comes back the matching way
+                    out(rx.set_raw(mode == "raw"))
+        elif tx and c == "stop":
+            out("OK abc stopped" if tx.stop_abc() else "OK abc was not running")
+            if rx and rx.raw:
+                out(rx.set_raw(False))
+        elif rx and c == "raw":
+            a = arg.lower()
+            out(rx.set_raw(not rx.raw if a == "" else a in ("on", "1")))
         elif tx and c == "mot":
             out(motors.handle(arg) if motors else "ERR no motors.py")
         elif rx and c == "cal":

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 beacon_test.py - find a blinking blue light with the camera and measure how
-steady the detected position is. Works on Windows and on Linux (Pi 5).
+steady the detected position is. Works on Windows, macOS and Linux (Pi 5).
 
 Detection is a per-pixel lock-in at the blink frequency: each pixel's
 "blueness" (blue minus the larger of red and green) is high-passed, multiplied
@@ -21,6 +21,14 @@ Windows examples:
   py beacon_test.py --exposure -7    # manual exposure, about 1/128 s
   py beacon_test.py --device 1       # if the Kiyo isn't camera 0
 
+macOS examples (the first run asks for camera permission for the app
+you launch from, e.g. VS Code or Terminal; allow it in System Settings >
+Privacy & Security > Camera, then restart that app):
+  python3 beacon_test.py             # camera 0, defaults
+  python3 beacon_test.py --device 1  # if the Kiyo isn't camera 0
+  macOS doesn't let OpenCV set exposure, gain or focus, so --exposure,
+  --gain and --settings are ignored there.
+
 Pi / Linux examples:
   python3 beacon_test.py --exposure 20 --gain 0
   python3 beacon_test.py --headless --range 25
@@ -36,6 +44,7 @@ import cv2
 import numpy as np
 
 IS_WIN = platform.system() == "Windows"
+IS_MAC = platform.system() == "Darwin"
 
 
 def v4l2_set(dev, ctrl):
@@ -77,8 +86,8 @@ def main():
     ap = argparse.ArgumentParser(
         description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--device", default="0" if IS_WIN else "/dev/video0",
-                    help="camera index (Windows) or device path (Linux)")
+    ap.add_argument("--device", default="/dev/video0" if not (IS_WIN or IS_MAC) else "0",
+                    help="camera index (Windows, macOS) or device path (Linux)")
     ap.add_argument("--freq", type=float, default=10.0,
                     help="blink frequency in Hz (default 10)")
     ap.add_argument("--width", type=int, default=1920)
@@ -114,18 +123,31 @@ def main():
     if IS_WIN:
         cap = cv2.VideoCapture(dev, cv2.CAP_DSHOW)
         raw_fmt = "YUY2"
+    elif IS_MAC:
+        if a.exposure is not None or a.settings:
+            print("[warn] macOS: OpenCV can't set exposure/gain or open the "
+                  "settings dialog; ignoring --exposure/--gain/--settings")
+        cap = cv2.VideoCapture(dev, cv2.CAP_AVFOUNDATION)
+        raw_fmt = None  # AVFoundation picks the pixel format itself
     else:
         if a.exposure is not None:
             lock_camera_linux(a.device, a.exposure, a.gain)
         cap = cv2.VideoCapture(dev, cv2.CAP_V4L2)
         raw_fmt = "YUYV"
     if not cap.isOpened():
-        raise SystemExit(f"could not open camera {a.device}. "
-                         "Close other apps using it (Synapse preview, Teams, "
-                         "OBS) or try --device 1")
+        hint = ("Close other apps using it (Synapse preview, Teams, OBS) "
+                "or try --device 1")
+        if IS_MAC:
+            hint = ("Check System Settings > Privacy & Security > Camera "
+                    "allows the app you ran this from (VS Code / Terminal), "
+                    "restart that app, close Zoom/Teams/OBS/Photo Booth, "
+                    "or try another --device (0, 1, 2; an iPhone via "
+                    "Continuity Camera can take a number)")
+        raise SystemExit(f"could not open camera {a.device}. {hint}")
 
-    cap.set(cv2.CAP_PROP_FOURCC,
-            cv2.VideoWriter_fourcc(*("MJPG" if a.mjpeg else raw_fmt)))
+    if raw_fmt or a.mjpeg:
+        cap.set(cv2.CAP_PROP_FOURCC,
+                cv2.VideoWriter_fourcc(*("MJPG" if a.mjpeg else raw_fmt)))
     cap.set(cv2.CAP_PROP_FRAME_WIDTH, a.width)
     cap.set(cv2.CAP_PROP_FRAME_HEIGHT, a.height)
     cap.set(cv2.CAP_PROP_FPS, a.fps)
@@ -138,11 +160,12 @@ def main():
     w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
     code = int(cap.get(cv2.CAP_PROP_FOURCC))
-    fourcc = "".join(chr((code >> 8 * i) & 0xFF) for i in range(4))
+    fourcc = ("".join(chr((code >> 8 * i) & 0xFF) for i in range(4))
+              if code > 0 else "format not reported")
     print(f"camera: {w}x{h} {fourcc!r}, requested {a.fps} fps")
     if (w, h) != (a.width, a.height):
-        print("[warn] camera gave a different size; on Windows try --mjpeg "
-              "or a USB 3 port")
+        print("[warn] camera gave a different size; on Windows try --mjpeg; "
+              "use a USB 3 port")
 
     sw, sh = max(1, int(w * a.scale)), max(1, int(h * a.scale))
     mean = np.zeros((sh, sw), np.float32)
@@ -155,6 +178,9 @@ def main():
 
     positions = collections.deque(maxlen=120)
     stamps = collections.deque(maxlen=120)
+    wait_s = collections.deque(maxlen=120)  # time blocked in cap.read()
+    work_s = collections.deque(maxlen=120)  # time spent processing a frame
+    fails = 0
     t0 = prev = warmup_until = None
     # V4L2 gives real capture timestamps; DirectShow usually doesn't, so on
     # Windows use perf_counter (time.monotonic is ~16 ms coarse there).
@@ -165,11 +191,20 @@ def main():
 
     try:
         while True:
+            tr = time.perf_counter()
             ok, frame = cap.read()
             if not ok:
-                print("frame grab failed")
-                break
+                # macOS cameras drop the odd frame; only give up if it lasts.
+                fails += 1
+                if fails >= 40:
+                    print("frame grab failed repeatedly; camera unplugged "
+                          "or taken by another app?")
+                    break
+                time.sleep(0.05)
+                continue
+            fails = 0
             now = time.perf_counter()
+            wait_s.append(now - tr)
             if use_cam_ts is None:
                 use_cam_ts = cap.get(cv2.CAP_PROP_POS_MSEC) > 0
             t = cap.get(cv2.CAP_PROP_POS_MSEC) / 1000.0 if use_cam_ts else now
@@ -239,8 +274,21 @@ def main():
                 else:
                     status += (f"no beacon (peak {peak:.1f}, "
                                f"contrast {contrast:.1f})")
-                if len(stamps) > 60 and fps < 0.85 * a.fps:
-                    status += " [slow: try --scale 0.25]"
+                if len(stamps) > 60:
+                    wait_ms = 1000 * sum(wait_s) / len(wait_s)
+                    work_ms = 1000 * sum(work_s) / max(1, len(work_s))
+                    status += f" | wait {wait_ms:.0f} ms work {work_ms:.0f} ms"
+                    if fps < 2.2 * a.freq:
+                        status += (f" [too slow to see a {a.freq:g} Hz blink, "
+                                   f"need {2.2 * a.freq:.0f}+ fps: ")
+                        status += ("processing-limited, try --scale 0.25]"
+                                   if work_ms > wait_ms else
+                                   "camera-limited, add light or try "
+                                   "--width 1280 --height 720]")
+                    elif fps < 0.85 * a.fps:
+                        status += (" [slow: try --scale 0.25]"
+                                   if work_ms > wait_ms else
+                                   " [camera gives fewer fps than requested]")
                 print(status, flush=True)
 
             if show:
@@ -271,6 +319,7 @@ def main():
                     cv2.imwrite(f"snap-{tag}-blue.png", blue_only)
                     cv2.imwrite(f"snap-{tag}-blink.png", heat)
                     print(f"saved snap-{tag}-.png")
+            work_s.append(time.perf_counter() - now)
     except KeyboardInterrupt:
         pass
     finally:

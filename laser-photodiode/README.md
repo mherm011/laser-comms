@@ -57,6 +57,9 @@ If a command replies `ERR unknown command`, check the spelling first, then check
 | `msg hello world` | Sends the text over the laser with error correction. Up to 2000 bytes, about 47 characters per second. |
 | `test 200` | Sends 200 numbered test frames (about 72 s) so the receiver can score the link. `test` with no number sends 200. |
 | `rep 2` | Sends every message frame twice, for a wobbly link. `rep 1` goes back to normal. |
+| `abc` | Sends A, B, C … Z over and over as raw bytes with no error correction, one every 100 ms (`abc 50` for faster). For watching the receiver live. Stops after 5 minutes, or with `stop`. |
+| `abc fec` | Same, but each letter goes in its own error-corrected frame (about 3 letters a second). |
+| `stop` | Stops `abc`. |
 | `mot <args>` | Passed to `motors.py` for the gimbal. Does nothing until someone writes that file. |
 
 **Photodiode (RX or BOTH)**
@@ -66,6 +69,7 @@ If a command replies `ERR unknown command`, check the spelling first, then check
 | `mon` | Prints the sensor voltage 10 times a second as a number and a bar. Stops after 20 s, or when you press any key. |
 | `cal` | Measures for 2 s and reports the dark and lit levels. Run it while the laser runs `sq 2`. You want dark ≤ 0.5 V and lit ≥ 2.3 V. |
 | `scope` | Fast capture that measures pulse widths. Run it while the laser runs `sq 500`. Both pulse means should be 1000 µs ± 250. |
+| `raw` | Prints every received byte the moment it arrives, instead of decoding frames. Use it with `abc`. `raw off` returns to normal. |
 | `beacon 4` | Blinks the beacon LED at 4 Hz. Also `beacon on` and `beacon off`. |
 | `reset` | Clears the receive counters. |
 
@@ -75,6 +79,7 @@ If a command replies `ERR unknown command`, check the spelling first, then check
 |---|---|
 | `stat` | Counters: frames sent, frames received, bytes repaired, and so on. |
 | `ping`, `role`, `help` | As described above. |
+| `baud 2000` | Changes the line rate on this board until it reboots. `baud` alone shows the current rate. With two boards, set the same rate on both. |
 
 Received messages print on the receiving board as `MSG 0: hello world`. After a `test`, the receiving board prints a report that ends in `TEST verdict: PASS` or `FAIL`.
 
@@ -88,6 +93,23 @@ With the laser aimed at the photodiode:
 5. `test 50`. About 18 s later you should see `TEST verdict: PASS`.
 
 **With two boards (TX and RX):** connect to each from its own computer, or from two windows. Type the laser commands on the TX board and read the results (`MSG ...`, the `TEST` report, `cal`, `scope`, `mon`) on the RX board.
+
+### 6. Live alphabet test
+
+This shows what the receiver sees in real time while you move the beam around.
+
+- **One board (BOTH):** type `abc`. The receiver display switches to raw mode by itself.
+- **Two boards:** type `raw` on the RX board first, then `abc` on the TX board.
+
+What you'll see:
+
+| Beam | Receiver prints |
+|---|---|
+| Fully on the sensor | `ABCDEFGHIJKLMNOPQRSTUVWXYZ`, one line per alphabet |
+| Blocked or pointed away | nothing, then `RAW (no signal)` after 1 s |
+| Swept across, or half on | wrong letters, or bytes in `{hex}` such as `{D3}` |
+
+`abc` has no error correction, so a half-blocked letter comes out wrong. To see the difference error correction makes, type `stop`, then `abc fec`. Now each letter is either right (`MSG 12: M`) or missing (a gap in the numbers), never wrong. Type `stop` when you're done.
 
 ### If something's wrong
 
@@ -182,7 +204,7 @@ Clamp the laser and the OPT101 facing each other a short distance apart, with th
 3. **Data:** run `data`, then `test 200` (about 72 s). The RX side prints `TEST verdict: PASS` with 0 lost frames and 0 payload errors. "Bytes repaired" should be 0 or close to it on a good link.
 4. `msg hello world` should print `MSG 0: hello world`.
 5. **Prove it's consistent:** run `test 1000` (about 6 min) a few times: with room lights on and off, while waving a flashlight near the tube, and with the beacon blinking (`beacon 4`). Each run should PASS.
-6. *Optional margin check:* set `BAUD = 2000` in `config.py`, then rerun `scope` (with `sq 1000`) and `test 200`. If 2000 bps passes, 1000 bps has real margin. Set it back to 1000 afterwards.
+6. *Optional margin check:* type `baud 2000` (on both boards), then rerun `scope` (with `sq 1000`) and `test 200`. If 2000 bps passes, 1000 bps has real margin. `baud 1000` or a reboot puts it back. To make a rate permanent, set `BAUD` in `config.py`.
 
 ### Stage 4: split onto two Picos (you'll need a second Pico)
 - Copy the same four files to both boards. Set `ROLE = "TX"` on the laser board and `ROLE = "RX"` on the OPT101 board.
